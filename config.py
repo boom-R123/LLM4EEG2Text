@@ -38,7 +38,9 @@ def get_config(case):
         parser.add_argument('-eeg', '--eeg_type', help='choose from {GD, FFD, TRT}', default = 'GD', required=False)
         parser.add_argument('-band', '--eeg_bands', nargs='+', help='specify freqency bands', default = ['_t1','_t2','_a1','_a2','_b1','_b2','_g1','_g2'] , required=False)
         parser.add_argument('-cuda', '--cuda', help='specify cuda device name, e.g. cuda:0, cuda:1, etc', default = 'cuda:0')
-        
+        parser.add_argument('-dataset', '--dataset_path', help='specify dataset path', default = './data/ZuCo/', required=True)
+        parser.add_argument('-model', '--model_path', help='specify model path for pretrained model', default = './models/bert-base-uncased', required=True)
+        parser.add_argument('-llm', '--llm_path', help='specify llm model path for LLMTranslator', default = './models/llama-2-7b-chat-hf', required=True)
         parser.add_argument('-train_input', '--train_input', help='add noise' ,required=True)
         args = vars(parser.parse_args())
 
@@ -80,6 +82,9 @@ def get_config(case):
         parser.add_argument('-test_input', '--test_input', help='add noise' ,required=True)
         parser.add_argument('-train_input', '--train_input', help='add noise' ,required=True)
         parser.add_argument('-cuda', '--cuda', help='specify cuda device name, e.g. cuda:0, cuda:1, etc', default = 'cuda:0')
+        parser.add_argument('-dataset', '--dataset_path', help='specify dataset path', default = './data/ZuCo/', required=True)
+        parser.add_argument('-model', '--model_path', help='specify model path for pretrained model', default = './models/bert-base-uncased', required=True)
+        parser.add_argument('-llm', '--llm_path', help='specify llm model path for LLMTranslator', default = './models/llama-2-7b-chat-hf', required=True)
         args = vars(parser.parse_args())
         
     elif case == 'eval_sentiment':

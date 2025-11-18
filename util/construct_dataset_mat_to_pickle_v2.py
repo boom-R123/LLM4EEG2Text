@@ -9,7 +9,7 @@ import pickle
 
 task = "NR"
 
-rootdir = "./dataset/ZuCo/task2-NR-2.0/Matlab_files/"
+rootdir = "./data/ZuCo/task2-NR-2.0/Matlab_files/"
 
 print('##############################')
 print(f'start processing ZuCo task2-NR-2.0...')
@@ -20,7 +20,6 @@ for file in tqdm(os.listdir(rootdir)):
     if file.endswith(task+".mat"):
 
         file_name = rootdir + file
-
         # print('file name:', file_name)
         subject = file_name.split("ts")[1].split("_")[0]
         # print('subject: ', subject)
@@ -33,7 +32,7 @@ for file in tqdm(os.listdir(rootdir)):
             f = h5py.File(file_name,'r')
             # print('keys in f:', list(f.keys()))
             sentence_data = f['sentenceData']
-            # print('keys in sentence_data:', list(sentence_data.keys()))
+            print('keys in sentence_data:', list(sentence_data.keys()))
             
             # sent level eeg 
             # mean_t1 = np.squeeze(f[sentence_data['mean_t1'][0][0]][()])
@@ -121,7 +120,7 @@ if dataset_dict == {}:
     print(f'No mat file found for {task_name}')
     quit()
 
-output_dir = f'./dataset/ZuCo/{task_name}/pickle'
+output_dir = f'./data/ZuCo/{task_name}/pickle'
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 

@@ -16,25 +16,33 @@ import torch.nn.functional as F
 import time
 from transformers import BertLMHeadModel, BartTokenizer, BartForConditionalGeneration, BartConfig, BartForSequenceClassification, BertTokenizer, BertConfig, BertForSequenceClassification, RobertaTokenizer, RobertaForSequenceClassification, PegasusForConditionalGeneration, PegasusTokenizer, T5Tokenizer, T5ForConditionalGeneration, BertGenerationDecoder
 from data import ZuCo_dataset
-from model_decoding import BrainTranslator, BrainTranslatorNaive, T5Translator
+from model_decoding import BrainTranslator, BrainTranslatorNaive
 from nltk.translate.bleu_score import sentence_bleu, corpus_bleu
 from rouge import Rouge
 from config import get_config
 import evaluate
 from evaluate import load
+from transformers import LlamaConfig, LlamaForCausalLM, LlamaTokenizer, BertModel
+from model import LLMTranslator
+import bert_score
+import random
+
+
 
 metric = evaluate.load("sacrebleu")
 cer_metric = load("cer")
 wer_metric = load("wer")
 
 def remove_text_after_token(text, token='</s>'):
-    # 특정 토큰 이후의 텍스트를 찾아 제거
+    # 查找并删除</s>后面的文本
     token_index = text.find(token)
-    if token_index != -1:  # 토큰이 발견된 경우
-        return text[:token_index]  # 토큰 이전까지의 텍스트 반환
-    return text  # 토큰이 없으면 원본 텍스트 반환
+    if token_index != -1:  
+        return text[:token_index] 
+    return text 
 
-def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_results_path = './results/temp.txt' , score_results='./score_results/task.txt'):
+
+def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_results_path = './results/temp.txt' , 
+               score_results='./score_results/task.txt', input_type = 'EEG', pretrained_model=None, llama2Tokenizer=None, embedding_model=None):
     # modified from: https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html
     start_time = time.time()
     model.eval()   # Set model to evaluate mode
@@ -43,163 +51,126 @@ def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_resu
     target_string_list = []
     pred_tokens_list = []
     pred_string_list = []
-    pred_tokens_list_previous = []
-    pred_string_list_previous = []
 
 
+    num = 0
+    subject_list = []
+    s_num = 0
+    subjeces = ['ZAB', 'ZDM', 'ZGW','ZDN', 'ZJM', 'ZJN', 'ZJS', 'ZKB', 'ZKH', 'ZKW', 'ZMG', 'ZPH', 'example1', 'example2']
+    embeddings = {}
+    word_lists = {}
+    for s in subjeces:
+        word_lists[s] = []
+        embeddings[s] = torch.ones((1, 840))
+    
     with open(output_all_results_path,'w') as f:
-        for input_embeddings, seq_len, input_masks, input_mask_invert, target_ids, target_mask, sentiment_labels in tqdm(dataloaders['test']):
+        for input_embeddings, seq_len, input_masks, input_mask_invert, target_ids, target_mask, \
+            sentiment_labels, word_content, word_text_embeddings, word_token_nums, word_negative_embedding, subject, word_list in tqdm(dataloaders['test']):
             # load in batch
             input_embeddings_batch = input_embeddings.to(device).float() # B, 56, 840
-            input_masks_batch = input_masks.to(device) # B, 56
+            word_text_embeddings = word_text_embeddings.float().to(device)
+            word_token_nums = word_token_nums.to(device)
             target_ids_batch = target_ids.to(device) # B, 56
             input_mask_invert_batch = input_mask_invert.to(device) # B, 56
-            
-            target_tokens = tokenizer.convert_ids_to_tokens(target_ids_batch[0].tolist(), skip_special_tokens = True)
+
+            # 原来使用BERT token
             target_string = tokenizer.decode(target_ids_batch[0], skip_special_tokens = True)
-            # print('target ids tensor:',target_ids_batch[0])
-            # print('target ids:',target_ids_batch[0].tolist())
-            # print('target tokens:',target_tokens)
-            # print('target string:',target_strininvert.to(device) # B, 56
-            
+            # 转为使用llama2 token
+            target_ids_batch = llama2Tokenizer(target_string, return_tensors='pt')['input_ids'].to(device)
+            target_tokens = llama2Tokenizer.convert_ids_to_tokens(target_ids_batch[0].tolist(), skip_special_tokens = True)
+            word_content = word_content[0].split()
+            left_idx = target_string.find(word_content[0].lower()) + len(word_content[0])
+            left_idx = len(llama2Tokenizer([target_string[:left_idx]])['input_ids'][0])
+            num += 1
+
+            encoder_embedding = input_embeddings_batch[~input_mask_invert_batch.bool()].detach().cpu()
+            embeddings[subject[0]] = torch.cat((embeddings[subject[0]], encoder_embedding), dim=0)
+            word_lists[subject[0]] += word_list[0].split("<DIV>")
+            subject_list += [subject[0]] * encoder_embedding.shape[0]
+            # print(len(word_list[0].split("<DIV>")), input_masks.float().sum().item())
+
             f.write(f'target string: {target_string}\n')
 
             # add to list for later calculate bleu metric
             target_tokens_list.append([target_tokens])
             target_string_list.append(target_string)
-            
-            """replace padding ids in target_ids with -100"""
-            target_ids_batch[target_ids_batch == tokenizer.pad_token_id] = -100 
 
-            # target_ids_batch_label = target_ids_batch.clone().detach()
-            # target_ids_batch_label[target_ids_batch_label == tokenizer.pad_token_id] = -100
 
-            # Original code 
-            seq2seqLMoutput = model(input_embeddings_batch, input_masks_batch, input_mask_invert_batch, target_ids_batch) # (batch, time, n_class)
-            logits_previous = seq2seqLMoutput.logits
-            probs_previous = logits_previous[0].softmax(dim = 1)
-            values_previous, predictions_previous = probs_previous.topk(1)
-            predictions_previous = torch.squeeze(predictions_previous)
-            predicted_string_previous = remove_text_after_token(tokenizer.decode(predictions_previous).split('</s></s>')[0].replace('<s>',''))
-            f.write(f'predicted string with tf: {predicted_string_previous}\n')
-            predictions_previous = predictions_previous.tolist()
-            truncated_prediction_previous = []
-            for t in predictions_previous:
-                if t != tokenizer.eos_token_id:
-                    truncated_prediction_previous.append(t)
-                else:
-                    break
-            pred_tokens_previous = tokenizer.convert_ids_to_tokens(truncated_prediction_previous, skip_special_tokens = True)
-            pred_tokens_list_previous.append(pred_tokens_previous)
-            pred_string_list_previous.append(predicted_string_previous)
+            predictions = model.generate(input_embeddings_batch=input_embeddings_batch, 
+                                                  input_mask_invert=input_mask_invert_batch, 
+                                                  input_ids=target_ids_batch[:, :left_idx], 
+                                                  word_token_nums=word_token_nums[0],
+                                                  word_text_embeddings=word_text_embeddings, 
+                                                  LLM=pretrained_model, 
+                                                  embedding_model=embedding_model,
+                                                  max_length=target_mask.sum().item())
             
-
-            # Modify code
-            predictions=model.generate(input_embeddings_batch, input_masks_batch, input_mask_invert_batch, target_ids_batch,
-                                       max_length=56,
-                                       num_beams=5,
-                                       do_sample=True,
-                                       repetition_penalty= 5.0,
-                                       no_repeat_ngram_size = 2
-                                       # num_beams=5,encoder_no_repeat_ngram_size =1,
-                                       # do_sample=True, top_k=15,temperature=0.5,num_return_sequences=5,
-                                       # early_stopping=True
-                                       )
             
-            predicted_string=tokenizer.batch_decode(predictions, skip_special_tokens=True)[0]
-            # predicted_string=predicted_string.squeeze()
-            
-            predictions=tokenizer.encode(predicted_string)
-            # print('predicted string:',predicted_string)
-            f.write(f'predicted string: {predicted_string}\n')
-            f.write(f'################################################\n\n\n')
-
-            # convert to int list
-            # predictions = predictions.tolist() # 이미 list 형식이다. 
+            predictions = torch.squeeze(predictions)
+            predicted_string = remove_text_after_token(llama2Tokenizer.decode(predictions).split('</s></s>')[0].replace('<s>',''))
+            print(target_string)
+            print(predicted_string)
+            f.write(f'predicted string with tf: {predicted_string}\n')
+            predictions = predictions.tolist()
             truncated_prediction = []
             for t in predictions:
-                if t != tokenizer.eos_token_id:
+                if t != llama2Tokenizer.eos_token_id:
                     truncated_prediction.append(t)
                 else:
                     break
-            pred_tokens = tokenizer.convert_ids_to_tokens(truncated_prediction, skip_special_tokens = True)
-            # print('predicted tokens:',pred_tokens)
+            pred_tokens = llama2Tokenizer.convert_ids_to_tokens(truncated_prediction, skip_special_tokens = True)
             pred_tokens_list.append(pred_tokens)
             pred_string_list.append(predicted_string)
-            # pred_tokens_list.extend(pred_tokens)
-            # pred_string_list.extend(predicted_string)
-            # print('################################################')
-            # print()
-    # print(f"pred_string_list : {pred_string_list}")
+            
+            f.write(f'################################################\n\n\n')
+
     
     """ calculate corpus bleu score """
     weights_list = [(1.0,),(0.5,0.5),(1./3.,1./3.,1./3.),(0.25,0.25,0.25,0.25)]
     corpus_bleu_scores = []
-    corpus_bleu_scores_previous = []
     for weight in weights_list:
         # print('weight:',weight)
         corpus_bleu_score = corpus_bleu(target_tokens_list, pred_tokens_list, weights = weight)
-        corpus_bleu_score_previous = corpus_bleu(target_tokens_list, pred_tokens_list_previous, weights = weight)
         corpus_bleu_scores.append(corpus_bleu_score)
-        corpus_bleu_scores_previous.append(corpus_bleu_score_previous)
         print(f'corpus BLEU-{len(list(weight))} score:', corpus_bleu_score)
-        print(f'corpus BLEU-{len(list(weight))} score with tf:', corpus_bleu_score_previous)
 
 
     """ calculate sacre bleu score """
     
     reference_list = [[item] for item in target_string_list]
 
-    #print(f'ref: {reference_list}')
-    #print(f'pred: {prediction_list}')
+
     sacre_blue = metric.compute(predictions=pred_string_list, references=reference_list)
-    sacre_blue_previous = metric.compute(predictions=pred_string_list_previous, references=reference_list)
-    print("sacreblue score: ", sacre_blue, '\n')
-    print("sacreblue score with tf: ", sacre_blue_previous)
+    print("sacreblue score", sacre_blue)
 
 
     print()
     """ calculate rouge score """
     rouge = Rouge()
-    
-    # pred_string_list = [item for sublist in pred_string_list for item in sublist]
-    # pred_string_list = [item for sublist in pred_string_list for item in sublist]
-    # pred_string_list_previous = [item for sublist in pred_string_list_previous for item in sublist]
-    # rouge_scores = rouge.get_scores(pred_string_list, target_string_list, avg = True, ignore_empty=True)
-    # rouge_scores_previous = rouge.get_scores(pred_string_list_previous, target_string_list, avg = True, ignore_empty=True)
-    # print('rouge_scores: ', rouge_scores)
-    # print('rouge_scores with tf:', rouge_scores_previous)
-
-    # rouge_scores_previous = rouge.get_scores(pred_string_list_previous, target_string_list, avg = True, ignore_empty=True)
-    # print('rouge_scores', rouge_scores)
-    # print('previous rouge_scores', rouge_scores_previous)
 
     try:
         rouge_scores = rouge.get_scores(pred_string_list, target_string_list, avg = True, ignore_empty=True)
+        print("Rouge score:", rouge_scores)
     except ValueError as e:
         rouge_scores = 'Hypothesis is empty'
-
-    try:
-        rouge_scores_previous = rouge.get_scores(pred_string_list_previous, target_string_list, avg = True, ignore_empty=True)
-    except ValueError as e:
-        rouge_scores_previous = 'Hypothesis is empty'
     print()
 
+
+    bertscore_P, bertscore_R, bertscore_F1 = bert_score.score(pred_string_list, target_string_list, lang="en", verbose=True)
+    bertscore_P = bertscore_P.mean().item()
+    bertscore_R = bertscore_R.mean().item()
+    bertscore_F1 = bertscore_F1.mean().item()
+    print("Bert score:", bertscore_P, bertscore_R, bertscore_F1)
 
     print()
     """ calculate WER score """
-    #wer = WordErrorRate()
     wer_scores = wer_metric.compute(predictions=pred_string_list, references=target_string_list)
-    wer_scores_previous = wer_metric.compute(predictions=pred_string_list_previous, references=target_string_list)
     print("WER score:", wer_scores)
-    print("WER score with tf:", wer_scores_previous)
     
 
     """ calculate CER score """
     cer_scores = cer_metric.compute(predictions=pred_string_list, references=target_string_list)
-    cer_scores_previous = cer_metric.compute(predictions=pred_string_list_previous, references=target_string_list)
     print("CER score:", cer_scores)
-    print("CER score with tf:", cer_scores_previous)
 
 
     end_time = time.time()
@@ -207,16 +178,12 @@ def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_resu
 
      # score_results (only fix teacher-forcing)
     file_content = [
-    f'corpus_bleu_score = {corpus_bleu_scores}',
-    f'sacre_blue_score = {sacre_blue}',
-    f'rouge_scores = {rouge_scores}',
-    f'wer_scores = {wer_scores}',
-    f'cer_scores = {cer_scores}',
-    f'corpus_bleu_score_with_tf = {corpus_bleu_scores_previous}',
-    f'sacre_blue_score_with_tf = {sacre_blue_previous}',
-    f'rouge_scores_with_tf = {rouge_scores_previous}',
-    f'wer_scores_with_tf = {wer_scores_previous}',
-    f'cer_scores_with_tf = {cer_scores_previous}',
+        f'corpus_bleu_score = {corpus_bleu_scores}',
+        f'sacre_blue_score = {sacre_blue}',
+        f'rouge_scores = {rouge_scores}',
+        f'bert_score = ["p": {bertscore_P}, "r": {bertscore_R}, "f1": {bertscore_F1}]',
+        f'wer_scores = {wer_scores}',
+        f'cer_scores = {cer_scores}',
     ]
     
     with open(score_results, "a") as file_results:
@@ -226,7 +193,6 @@ def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_resu
                     file_results.write(str(item) + "\n")
             else:
                 file_results.write(str(line) + "\n")
-
 
 
 if __name__ == '__main__': 
@@ -248,11 +214,13 @@ if __name__ == '__main__':
     bands_choice = training_config['eeg_bands']
     print(f'[INFO]using bands: {bands_choice}')
     
-    dataset_setting = 'unique_sent'
+    dataset_setting = 'unique_sent'  # unique_subj unique_sent
 
     task_name = training_config['task_name']
     model_name = training_config['model_name']
-    
+    dataset_path = args['dataset_path']
+    model_path = args['model_path']
+    llm_path = args['llm_path']
 
     if test_input == 'EEG' and train_input=='EEG':
         print("EEG and EEG")
@@ -264,10 +232,12 @@ if __name__ == '__main__':
 
 
     ''' set random seeds '''
-    seed_val = 20 #500
+    seed_val = 888 #500
     np.random.seed(seed_val)
     torch.manual_seed(seed_val)
     torch.cuda.manual_seed_all(seed_val)
+    random.seed(seed_val)
+
 
     ''' set up device '''
     # use cuda
@@ -284,83 +254,76 @@ if __name__ == '__main__':
     ''' set up dataloader '''
     whole_dataset_dicts = []
     if 'task1' in task_name:
-        dataset_path_task1 = '/data/johj/ZuCo_data/task1-SR/task1_source.pkl' 
+        dataset_path_task1 = dataset_path + 'task1-SR/pickle/task1-SR-dataset.pickle' 
         with open(dataset_path_task1, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
     if 'task2' in task_name:
-        dataset_path_task2 = '/data/johj/ZuCo_data/task2-NR/task2_source.pkl' 
+        dataset_path_task2 = dataset_path + 'task2-NR/pickle/task2-NR-dataset.pickle' 
         with open(dataset_path_task2, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
     if 'task3' in task_name:
-        dataset_path_task3 = '/data/johj/ZuCo_data/task3-TSR/task3_source.pkl' 
+        dataset_path_task3 = dataset_path + 'task3-TSR/pickle/task3-TSR-dataset.pickle' 
         with open(dataset_path_task3, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
     if 'taskNRv2' in task_name:
-        dataset_path_taskNRv2 = '/data/johj/ZuCo_data/task2-NR-2.0/taskNRv2_source.pkl' 
+        dataset_path_taskNRv2 = dataset_path + 'task2-NR-2.0/pickle/task2-NR-2.0-dataset.pickle' 
         with open(dataset_path_taskNRv2, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
     print()
     
     if model_name in ['BrainTranslator','BrainTranslatorNaive']:
-        tokenizer = BartTokenizer.from_pretrained('facebook/bart-large')
-
-    elif model_name == 'PegasusTranslator':
-        tokenizer = PegasusTokenizer.from_pretrained('google/pegasus-xsum')
-    
-    elif model_name == 'T5Translator':
-        tokenizer = T5Tokenizer.from_pretrained("t5-large")
-        # tokenizer.set_prefix_tokens(language='english')
+        tokenizer = BartTokenizer.from_pretrained(model_path)
+    elif model_name == 'LLMTranslator':
+        tokenizer = BertTokenizer.from_pretrained(model_path)
 
     # test dataset
-    test_set = ZuCo_dataset(whole_dataset_dicts, 'test', tokenizer, subject = subject_choice, eeg_type = eeg_type_choice, bands = bands_choice, setting = dataset_setting, test_input=test_input)
-
+    test_set = ZuCo_dataset(whole_dataset_dicts, 'test', tokenizer, 
+                            subject = subject_choice, eeg_type = eeg_type_choice, bands = bands_choice, 
+                            setting = dataset_setting, test_input=test_input, model_path=model_path)
+    
     dataset_sizes = {"test_set":len(test_set)}
     print('[INFO]test_set size: ', len(test_set))
     
     # dataloaders
     test_dataloader = DataLoader(test_set, batch_size = batch_size, shuffle=False, num_workers=4)
-
     dataloaders = {'test':test_dataloader}
+
 
     ''' set up model '''
     checkpoint_path = args['checkpoint_path']
     
     if model_name == 'BrainTranslator':
-        pretrained_bart = BartForConditionalGeneration.from_pretrained('facebook/bart-large')
-        model = BrainTranslator(pretrained_bart, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
+        pretrained = BartForConditionalGeneration.from_pretrained(model_path)
+        model = BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
     
     elif model_name == 'BrainTranslatorNaive':
-        pretrained_bart = BartForConditionalGeneration.from_pretrained('facebook/bart-large')
+        pretrained_bart = BartForConditionalGeneration.from_pretrained(model_path)
         model = BrainTranslatorNaive(pretrained_bart, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
 
     elif model_name == 'BertGeneration':
-        pretrained = BertGenerationDecoder.from_pretrained('google-bert/bert-large-uncased', is_decoder = True)
+        pretrained = BertGenerationDecoder.from_pretrained(model_path, is_decoder = True)
         model = BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
         
-    elif model_name == 'PegasusTranslator':
-        pretrained = PegasusForConditionalGeneration.from_pretrained('google/pegasus-xsum')
-        model = BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
     
-    elif model_name == 'T5Translator':
-        pretrained = T5ForConditionalGeneration.from_pretrained("t5-large")
-        model = T5Translator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
-    
+    elif model_name == 'LLMTranslator':
+        pretrained = LlamaForCausalLM.from_pretrained(llm_path, device_map="auto")
+        pretrained = pretrained.bfloat16().eval()
+        embedding_model = BertModel.from_pretrained(model_path, device_map="auto")
+        embedding_model = embedding_model.eval()
+        llama2Tokenizer = LlamaTokenizer.from_pretrained(llm_path)
+        model = LLMTranslator(in_feature = 105*len(bands_choice), eeg_encoder_nhead=8, 
+                              eeg_encoder_dim_feedforward = 2048, embed_dim=768, model_path=model_path, llm_path=llm_path)
+
 
     state_dict = torch.load(checkpoint_path)
     new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
 
-    '''
-    if isinstance(model, nn.DataParallel):
-        model.module.load_state_dict(torch.load(checkpoint_path))
-    else:
-        model.load_state_dict(torch.load(checkpoint_path))
-    '''
-
-    # model.load_state_dict(torch.load(checkpoint_path))
     model.to(device)
     
     criterion = nn.CrossEntropyLoss()
     
     ''' eval '''
-    eval_model(dataloaders, device, tokenizer, criterion, model, output_all_results_path = output_all_results_path, score_results=score_results)
+    eval_model(dataloaders, device, tokenizer, criterion, model, output_all_results_path = output_all_results_path, 
+               score_results=score_results, input_type = test_input, 
+               pretrained_model = pretrained, llama2Tokenizer=llama2Tokenizer, embedding_model=embedding_model)

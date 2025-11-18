@@ -29,12 +29,12 @@ print(f'start processing ZuCo {task_name}...')
 
 if version == 'v1':
     # old version 
-    input_mat_files_dir = f'./dataset/ZuCo/{task_name}/Matlab_files' 
+    input_mat_files_dir = f'./data/ZuCo/{task_name}/Matlab_files' 
 elif version == 'v2':
     # new version, mat73 
-    input_mat_files_dir = f'./dataset/ZuCo/{task_name}/Matlab_files' 
+    input_mat_files_dir = f'./data/ZuCo/{task_name}/Matlab_files' 
 
-output_dir = f'./dataset/ZuCo/{task_name}/pickle'
+output_dir = f'./data/ZuCo/{task_name}/pickle'
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
@@ -56,12 +56,13 @@ for mat_file in tqdm(mat_files):
     elif version == 'v2':
         matdata = h5py.File(mat_file,'r')
         print(matdata)
-
     for sent in matdata:
+        # 遍历sent中的元素
+
         word_data = sent.word
         if not isinstance(word_data, float):
             # sentence level:
-            sent_obj = {'content':sent.content}
+            sent_obj = {'content':sent.content, 'rawData': np.array(sent.rawData)}
             sent_obj['sentence_level_EEG'] = {'mean_t1':sent.mean_t1, 'mean_t2':sent.mean_t2, 'mean_a1':sent.mean_a1, 'mean_a2':sent.mean_a2, 'mean_b1':sent.mean_b1, 'mean_b2':sent.mean_b2, 'mean_g1':sent.mean_g1, 'mean_g2':sent.mean_g2}
 
             if task_name == 'task1-SR':
@@ -98,8 +99,8 @@ for mat_file in tqdm(mat_files):
             sent_obj['word_tokens_has_fixation'] = word_tokens_has_fixation
             sent_obj['word_tokens_with_mask'] = word_tokens_with_mask
             sent_obj['word_tokens_all'] = word_tokens_all
-            
             dataset_dict[subject_name].append(sent_obj)
+
 
         else:
             print(f'missing sent: subj:{subject_name} content:{sent.content}, return None')
